@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>YouTrack Widget</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <h1> YouTrack</h1>
+    </div>
+    <div class="header-right">
+      <button id="theme-btn" title="Сменить тему">🌙</button>
+      <button id="refresh-btn" title="Обновить">🔄</button>
+    </div>
+  </header>
+  
+  <div class="filter-bar">
+    <button class="filter-btn active" data-filter="all">Все</button>
+    <button class="filter-btn" data-filter="QA">QA</button>
+    <button class="filter-btn" data-filter="In Progress">In Progress</button>
+    <button class="filter-btn" data-filter="To Prod">To Prod</button>
+    <button class="filter-btn" data-filter="Open">Open</button>
+  </div>
+  
+  <main id="tasks-list">
+    <div class="loading">Загрузка...</div>
+  </main>
+  
+  <footer>
+    <span id="task-count">0 задач</span>
+    <a href="#" id="open-yt">Открыть YouTrack →</a>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

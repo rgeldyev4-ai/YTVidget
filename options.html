@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Настройки YouTrack Widget</title>
+  <style>
+    body { font-family: Arial; padding: 20px; max-width: 500px; margin: 0 auto; }
+    input { width: 100%; padding: 8px; margin: 8px 0; box-sizing: border-box; }
+    button { padding: 10px 20px; background: #6c5ce7; color: white; border: none; border-radius: 4px; cursor: pointer; }
+    .saved { color: green; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <h2>Настройки YouTrack Widget</h2>
+  <label><b>URL YouTrack</b></label>
+  <input type="text" id="url" placeholder="https://company.youtrack.cloud">
+  <label><b>Permanent Token</b></label>
+  <input type="password" id="token" placeholder="perm:...">
+  <button id="save">Сохранить</button>
+  <div id="status"></div>
+  
+  <script src="options.js"></script>
+</body>
+</html>
