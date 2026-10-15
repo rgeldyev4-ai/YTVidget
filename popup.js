@@ -3,6 +3,8 @@ const THEME_KEY = 'youtrack_theme';
 let currentFilter = 'all';
 let allIssues = [];
 let currentConfig = null;
+// Кэш доступных статусов (State) по проекту: { projectShortName: [ { name, number, sourceLocale } ] }
+const statesCache = {};
 
 document.addEventListener('DOMContentLoaded', async () => {
   console.log('=== Расширение загружено ===');
@@ -89,7 +91,9 @@ async function loadTasks(config) {
   baseUrl = baseUrl.replace(/\/$/, '');
   
   const query = encodeURIComponent('for: me');
-  const fields = 'id,idReadable,summary,customFields(projectCustomField(field(name)),value(name))';
+  // issue/... — стандартные префиксы полей YouTrack REST API (без них сервер возвращает пустые объекты)
+  const fields = 'issue:id,issue:idReadable,issue:summary,issue:project(shortName,name),' +
+    'issue:customFields(projectCustomField(field(name)),value(name))';
   const url = baseUrl + '/api/issues?query=' + query + '&fields=' + fields + '&$top=100';
   console.log('URL:', url);
   
@@ -182,15 +186,231 @@ function renderTasks(issues, config) {
     }
     
     const stateColor = getStateColor(state);
+    const projectId = issue.id || '';
+    const projectShortName = (issue.project && issue.project.shortName) || '';
     
-    html += '<div class="task" style="border-left-color: ' + stateColor + '">';
+    html += '<div class="task" style="border-left-color: ' + stateColor + '" data-issue-id="' + projectId + '" data-project="' + escapeHtml(projectShortName) + '">';
     html += '<a href="' + config.url + '/issue/' + issue.idReadable + '" target="_blank" class="task-id">' + issue.idReadable + '</a>';
-    html += '<div class="task-summary">' + (issue.summary || 'Без названия') + '</div>';
-    html += '<div class="task-meta"><span class="badge" style="background: ' + stateColor + '; color: white">' + state + '</span>';
-    if (priority) html += '<span class="badge">' + priority + '</span>';
+    html += '<div class="task-summary">' + escapeHtml(issue.summary || 'Без названия') + '</div>';
+    html += '<div class="task-meta">';
+    // Селектор статуса вместо бейджа — позволяет менять статус прямо из виджета
+    html += '<select class="state-select" data-current="' + escapeHtml(state) + '" style="--state-color: ' + stateColor + '" title="Изменить статус">';
+    html += '<option value="" selected>' + escapeHtml(state) + '</option>';
+    html += '</select>';
+    if (priority) html += '<span class="badge">' + escapeHtml(priority) + '</span>';
     html += '</div></div>';
   }
   container.innerHTML = html;
+  
+  attachStateSelectHandlers();
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// ---------- Изменение статуса задачи ----------
+
+function getNormalizedBaseUrl() {
+  let baseUrl = currentConfig.url.trim();
+  if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
+    baseUrl = 'https://' + baseUrl;
+  }
+  return baseUrl.replace(/\/$/, '');
+}
+
+function apiFetch(path, options) {
+  const url = getNormalizedBaseUrl() + path;
+  return fetch(url, Object.assign({
+    headers: {
+      'Authorization': 'Bearer ' + currentConfig.token,
+      'Accept': 'application/json',
+      'Content-Type': 'application/json'
+    }
+  }, options));
+}
+
+// Получает список доступных статусов (State) проекта через YouTrack REST API
+async function fetchProjectStates(projectShortName) {
+  if (statesCache[projectShortName]) return statesCache[projectShortName];
+
+  let values = [];
+
+  // Вариант 1: значения поля State, специфичные для проекта
+  try {
+    const fields = 'name,project(shortName),perProjectValues(name,number,presentation)';
+    const query = encodeURIComponent('project: {' + projectShortName + '} and fieldName: State');
+    const response = await apiFetch('/api/customFields?' + query + '&fields=' + fields);
+
+    if (response.ok) {
+      const data = await response.json();
+      for (const cf of data) {
+        const perProject = cf.perProjectValues || [];
+        for (const v of perProject) {
+          if (v.name && !values.some(x => x.name === v.name)) {
+            values.push(v);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('Не удалось получить perProjectValues статусов:', e);
+  }
+
+  // Вариант 2 (запасной): общие значения EnumBundle Field "State"
+  if (values.length === 0) {
+    const fields = 'values(name,submittedValue,presentation)';
+    const response = await apiFetch('/api/admin/customFields/State' + encodeURIComponent(':') + 'State/values?fields=' + fields);
+
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+
+    const data = await response.json();
+    for (const v of (data || [])) {
+      const name = v.submittedValue || v.name;
+      if (name && !values.some(x => x.name === name)) {
+        values.push({ name: name, presentation: v.presentation || name });
+      }
+    }
+  }
+
+  if (values.length === 0) throw new Error('Статусы не найдены');
+
+  statesCache[projectShortName] = values;
+  return values;
+}
+
+// Подключает обработчики к селектам статусов и подгружает варианты по мере необходимости
+function attachStateSelectHandlers() {
+  const selects = document.querySelectorAll('.state-select');
+  selects.forEach(sel => {
+    if (sel.dataset.loaded === '1') return;
+    sel.dataset.loaded = '1';
+    
+    const task = sel.closest('.task');
+    const projectShortName = task ? task.dataset.project : '';
+    
+    // Лениво подгружаем варианты статусов при фокусе/наведении, чтобы не долбить API
+    const loadOptions = () => {
+      if (sel.dataset.optionsLoaded === '1' || !projectShortName) return;
+      sel.dataset.optionsLoaded = '1';
+      fetchProjectStates(projectShortName).then(values => {
+        const current = sel.dataset.current;
+        sel.innerHTML = '';
+        for (const v of values) {
+          const opt = document.createElement('option');
+          opt.value = v.name;
+          opt.textContent = v.presentation || v.name;
+          if (v.name === current) opt.selected = true;
+          sel.appendChild(opt);
+        }
+        if (!values.some(v => v.name === current)) {
+          const opt = document.createElement('option');
+          opt.value = current;
+          opt.textContent = current;
+          opt.selected = true;
+          sel.insertBefore(opt, sel.firstChild);
+        }
+      }).catch(err => {
+        console.error('Не удалось загрузить статусы проекта:', err);
+        sel.dataset.optionsLoaded = '0';
+      });
+    };
+    
+    sel.addEventListener('focus', loadOptions);
+    sel.addEventListener('mouseenter', loadOptions);
+    sel.addEventListener('change', () => changeIssueState(task, sel));
+  });
+}
+
+// Отправляет изменение статуса в YouTrack и обновляет локальные данные
+async function changeIssueState(task, select) {
+  const issueId = task.dataset.issueId;
+  const newState = select.value;
+  if (!issueId || !newState) return;
+  
+  select.disabled = true;
+  select.classList.add('saving');
+  
+  try {
+    const response = await apiFetch('/api/issues/' + issueId, {
+      method: 'POST',
+      body: JSON.stringify({
+        customFields: [{
+          name: 'State',
+          value: { name: newState }
+        }]
+      })
+    });
+    
+    if (!response.ok) {
+      let msg = 'HTTP ' + response.status;
+      try {
+        const errBody = await response.json();
+        if (errBody && errBody.detailMessage) msg = errBody.detailMessage;
+      } catch (e) { /* ignore */ }
+      throw new Error(msg);
+    }
+    
+    // Обновляем локальные данные, чтобы не было рассинхрона с фильтрами
+    updateLocalIssueState(issueId, newState);
+    
+    select.style.setProperty('--state-color', getStateColor(newState));
+    select.dataset.current = newState;
+    showStatusToast('Статус обновлён: ' + newState, 'success');
+    
+    // Если текущий фильтр по статусу больше не совпадает — перерисовываем список
+    filterAndRender();
+    
+  } catch (error) {
+    console.error('Ошибка изменения статуса:', error);
+    showStatusToast('Не удалось изменить статус: ' + error.message, 'error');
+    // Возвращаем прежнее значение
+    select.value = select.dataset.current;
+  } finally {
+    select.disabled = false;
+    select.classList.remove('saving');
+  }
+}
+
+function updateLocalIssueState(issueId, newState) {
+  for (const issue of allIssues) {
+    if (String(issue.id) === String(issueId)) {
+      const cf = issue.customFields || [];
+      for (const f of cf) {
+        if (f.projectCustomField && f.projectCustomField.field && f.projectCustomField.field.name === 'State') {
+          f.value = { name: newState };
+          return;
+        }
+      }
+      // Статуса не было — добавляем
+      cf.push({
+        projectCustomField: { field: { name: 'State' } },
+        value: { name: newState }
+      });
+      return;
+    }
+  }
+}
+
+let toastTimer = null;
+function showStatusToast(message, type) {
+  let toast = document.getElementById('status-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'status-toast';
+    document.body.appendChild(toast);
+  }
+  toast.textContent = message;
+  toast.className = 'toast ' + type + ' visible';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    toast.classList.remove('visible');
+  }, 2500);
 }
 
 function getStateColor(state) {
